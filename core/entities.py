@@ -1,13 +1,17 @@
 from dataclasses import dataclass
 
 @dataclass
-class Item:
-    type: str
-    length: int # dalam satuan scaled integer
+class Part:
+    part_type: str
+    length: int # dalam satuan scaled integer (normalize)
+
+@dataclass
+class Parts:
+    part_type: str
+    length: int # dalam satuan scaled integer (normalize)
+    quantity: int
 
 @dataclass
 class Stock:
-    length: int
-    usable_length: int
+    length: int # dalam satuan scaled integer (normalize)
     quantity: int
-    unit_price: float = 0.0

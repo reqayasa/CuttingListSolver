@@ -14,7 +14,7 @@ class CuttingListApp:
         self.mainframe = ttk.Frame(self.root)
         self.mainframe.grid(row=0, column=0, sticky=(tk.N, tk.W, tk.E, tk.S))
 
-        self.items = None
+        self.required_parts = None
         self.scale = 1
         self.stocks = None
         self.result = None
@@ -24,8 +24,8 @@ class CuttingListApp:
         self.btn_frame = ttk.Frame(self.mainframe)
         self.btn_frame.grid(row=0, column=0, pady=10)
 
-        ttk.Button(self.btn_frame, text="Import Items",
-                   command=self.import_items
+        ttk.Button(self.btn_frame, text="Import Required Parts",
+                   command=self.import_required_parts
                    ).grid(row=0, column=0)
         ttk.Button(self.btn_frame, text="Import Stocks",
                    command=self.import_stocks
@@ -41,17 +41,16 @@ class CuttingListApp:
         self.data_frame.grid(row=1, column=0)
 
         # DATA FRAME
-        ttk.Label(self.data_frame, text="Items:").grid(row=0, column=0)
-
-        self.columns_item = ("Type", "Length")
-        self.tree_items = ttk.Treeview(self.data_frame, columns=self.columns_item, show="headings")
-        self.tree_items.grid(row=1, column=0, padx=8, pady=4)
-        for col in self.columns_item:
-            self.tree_items.heading(col, text=col.capitalize())
-            self.tree_items.column(col, width=100, anchor="center")
+        ttk.Label(self.data_frame, text="Required Parts:").grid(row=0, column=0)
+        self.columns_part = ("_i", "Type", "Length", "Quantity")
+        self.tree_required_parts = ttk.Treeview(self.data_frame, columns=self.columns_part, show="headings")
+        self.tree_required_parts.grid(row=1, column=0, padx=8, pady=4)
+        for col in self.columns_part:
+            self.tree_required_parts.heading(col, text=col.capitalize())
+            self.tree_required_parts.column(col, width=100, anchor="center")
 
         ttk.Label(self.data_frame, text="Stocks:").grid(row=0, column=1)
-        self.columns_stock = ("Length", "Usable Length", "Quantity", "Unit Price")
+        self.columns_stock = ("_k", "Length", "Quantity")
         self.tree_stocks = ttk.Treeview(self.data_frame, columns=self.columns_stock, show="headings")
         self.tree_stocks.grid(row=1, column=1, padx=8, pady=4)
         for col in self.columns_stock:
@@ -59,38 +58,38 @@ class CuttingListApp:
             self.tree_stocks.column(col, width=100, anchor="center")
 
         ttk.Label(self.data_frame, text="Result:").grid(row=0, column=2)
-        self.listbox = tk.Listbox(self.data_frame, width=50, height=10)
+        self.listbox = tk.Listbox(self.data_frame, width=80, height=30)
         self.listbox.grid(row=1, column=2, padx=8, pady=4)
 
     
-    def import_items(self):  
+    def import_required_parts(self):  
         filename = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if filename:
-            self.items, self.scale = csv_repository.load_items(filename)
-            messagebox.showinfo("Info", f"{len(self.items)} items loaded")
-        if self.items:
-            for i in self.tree_items.get_children():
-                self.tree_items.delete(i)
-            for item in self.items:
-                self.tree_items.insert("", tk.END, values=(item.type, item.length))
+            self.required_parts, self.scale = csv_repository.load_required_parts_aggreageted(filename)
+            messagebox.showinfo("Info", f"{len(self.required_parts)} required part loaded")
+        if self.required_parts:
+            for i in self.tree_required_parts.get_children():
+                self.tree_required_parts.delete(i)
+            for i, part in enumerate(self.required_parts):
+                self.tree_required_parts.insert("", tk.END, values=(i, part.part_type, part.length, part.quantity))
         
 
     def import_stocks(self):
         filename = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if filename:
-            self.stocks = csv_repository.load_stocks(filename, 1)
+            self.stocks = csv_repository.load_stocks_aggregated(filename, 1)
             messagebox.showinfo("Info", f"{len(self.stocks)} stocks loaded")
         if self.stocks:
-            for i in self.tree_stocks.get_children():
-                self.tree_stocks.delete(i)
-            for stock in self.stocks:
-                self.tree_stocks.insert("", tk.END, values=(stock.length, stock.usable_length, stock.quantity, stock.unit_price))
+            for k in self.tree_stocks.get_children():
+                self.tree_stocks.delete(k)
+            for k, stock in enumerate(self.stocks):
+                self.tree_stocks.insert("", tk.END, values=(k, stock.length, stock.quantity))
 
     def optimize(self):
-        if not self.items or not self.stocks:
-            messagebox.showerror("Error", "Import items dan stocks dulu")
+        if not self.required_parts or not self.stocks:
+            messagebox.showerror("Error", "Import Required Parts dan stocks dulu")
             return
-        self.result = self.optimizer.run(self.items, self.stocks)
+        self.result = self.optimizer.run(self.required_parts, self.stocks)
         self.show_result()
     
     def export_csv(self):
@@ -104,8 +103,8 @@ class CuttingListApp:
     def show_result(self):
         self.listbox.delete(0, tk.END)
         for i, b in enumerate(self.result):
-            used = sum(p.length for p in b["pieces"])
-            self.listbox.insert(tk.END, f"stocks {i+1}: used={used}/{b['usable_length']} | pieces={[p.type for p in b['pieces']]}")
+            # used = sum(p.length for p in b["pieces"])
+            self.listbox.insert(tk.END, f"stock length: {b["stock_length"]} | pattern: {b["pattern"]} | waste: {b["waste"]}")
 
     def run(self):
         self.root.mainloop()

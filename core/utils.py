@@ -1,6 +1,6 @@
 import math
 
-def detect_scale(value: str) -> int:
+def detect_unit_scale(value: str) -> int:
     """
     Deteksi scale factor berdasarkan jumlah desimal
     """
