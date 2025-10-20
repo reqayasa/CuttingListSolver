@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
-from math import floor
-from pprint import pprint
 import pulp
-from collections import defaultdict
+
 
 class OptimizerStrategy(ABC):
     @abstractmethod
@@ -11,100 +9,144 @@ class OptimizerStrategy(ABC):
 
 class ColumnGeneration(OptimizerStrategy):
     def optimize(self, required_parts_aggregated, stocks_aggregated):
-        # ---------------------------
-        # Build initial patterns
-        # ---------------------------
+        """
+        Column Generation + Integer Recovery with Feasibility Correction
+        ---------------------------------------------------------------
+        Tahapan:
+        1. Generate trivial patterns.
+        2. Jalankan column generation (LP relax) sampai optimal.
+        3. Jalankan integer master.
+        - Jika infeasible → hasilkan pattern baru berdasarkan duals dari LP terakhir.
+        - Ulangi sampai feasible atau tidak ada pattern baru yang berguna.
+        """
+
+        # =====================================================
+        # 1️⃣ Generate trivial patterns
+        # =====================================================
         patterns = self.generate_trivial_patterns(required_parts_aggregated, stocks_aggregated)
-        # ensure at least one pattern exists (should be, unless some item longer than all stocks)
         if not patterns:
             raise ValueError("No trivial patterns (check item vs stock lengths).")
 
-        # ---------------------------
-        # Column generation loop
-        # ---------------------------
+        # =====================================================
+        # 2️⃣ Data dasar
+        # =====================================================
         TOL = 1e-8
-        max_iters = 200
+        MAX_LP_ITERS = 200
+        MAX_INT_ITERS = 10  # batas tambahan pattern integer
 
-        part_lengths = []
-        for part in required_parts_aggregated:
-            part_lengths.append(part.length)
-        demands = []
-        for part in required_parts_aggregated:
-            demands.append(part.quantity)
-        stock_lengths = []
-        for stock in stocks_aggregated:
-            stock_lengths.append(stock.length)
-        stock_limits = []
-        for stock in stocks_aggregated:
-            stock_limits.append(stock.quantity)
-        stock_costs = []
-        for stock in stocks_aggregated:
-            stock_costs.append(stock.length)
+        part_lengths = [p.length for p in required_parts_aggregated]
+        demands = [p.quantity for p in required_parts_aggregated]
+        stock_lengths = [s.length for s in stocks_aggregated]
+        stock_limits = [s.quantity for s in stocks_aggregated]
+        stock_costs = [s.length for s in stocks_aggregated]
 
-        for it in range(max_iters):
-            # Build RMP (LP)
+        # =====================================================
+        # 3️⃣ Column generation (LP relax)
+        # =====================================================
+        for it in range(MAX_LP_ITERS):
+            # --- Build LP ---
             prob = pulp.LpProblem("RMP", pulp.LpMinimize)
             x_vars = []
             for j, patt in enumerate(patterns):
                 x = pulp.LpVariable(f"x_{j}", lowBound=0, cat="Continuous")
                 x_vars.append(x)
-            # objective: sum of x_j * cost_of_stock_type
+
+            # objective
             prob += pulp.lpSum(x_vars[j] * stock_costs[patterns[j]["stock_index"]] for j in range(len(patterns)))
-            # constraints: for each item i, sum_j a_ij * x_j >= demand_i
-            constraints = []
+
+            # demand constraints
             for i in range(len(part_lengths)):
-                cons = pulp.lpSum(patterns[j]["pattern"][i] * x_vars[j] for j in range(len(patterns))) >= demands[i]
-                prob.addConstraint(cons, name=f"dem_{i}")
-
-            for k in range(len(stock_lengths)):
-                cons = pulp.lpSum(x_vars[j] for j, p in enumerate(patterns) if p["stock_index"] == k) <= stock_limits[k]
-                # Ensure unique constraint name by appending iteration number
-                prob.addConstraint(cons, name=f"stock_limit_{k}_it{it}")
-
-            # solve LP
-            solver = pulp.PULP_CBC_CMD(msg=False)
-            res = prob.solve(solver)
-            status = pulp.LpStatus[prob.status]
-            if status not in ("Optimal", "Optimal Solution Found"):
-                raise RuntimeError("LP solver did not return optimal. Status: " + status)
-            obj = pulp.value(prob.objective)
-
-            # Try to read duals (pi_i). Not all solvers expose duals via PuLP; handle gracefully.
-            duals = []
-            duals_ok = True
-            try:
-                for i in range(len(part_lengths)):
-                    con = prob.constraints[f"dem_{i}"]
-                    pi = con.pi  # dual value
-                    duals.append(pi)
-            except Exception as e:
-                duals_ok = False
-                # If duals not available, cannot continue classical column generation here.
-                # We abort loop and inform user.
-            if not duals_ok:
-                raise RuntimeError(
-                    "Solver did not provide duals via PuLP constraints. "
-                    "Use a solver that returns duals (e.g., GLPK, CPLEX, Gurobi) or use Pyomo with a solver "
-                    "supporting duals."
+                prob.addConstraint(
+                    pulp.lpSum(patterns[j]["pattern"][i] * x_vars[j] for j in range(len(patterns))) >= demands[i],
+                    name=f"dem_{i}"
                 )
 
-            # Print iteration summary
-            print(f"\nIteration {it+1}: LP objective = {obj:.6f}")
-            print(" Current patterns (j : stock_idx, pattern, x_j):")
+            # stock limits
+            for k in range(len(stock_lengths)):
+                prob.addConstraint(
+                    pulp.lpSum(x_vars[j] for j, p in enumerate(patterns) if p["stock_index"] == k) <= stock_limits[k],
+                    name=f"stock_limit_{k}_it{it}"
+                )
+
+            # --- Solve LP ---
+            solver = pulp.PULP_CBC_CMD(msg=False)
+            prob.solve(solver)
+            status = pulp.LpStatus[prob.status]
+            if status not in ("Optimal", "Optimal Solution Found"):
+                raise RuntimeError(f"LP not optimal. Status: {status}")
+            obj = pulp.value(prob.objective)
+
+            # --- Duals (for subproblem) ---
+            duals = []
+            for i in range(len(part_lengths)):
+                duals.append(prob.constraints[f"dem_{i}"].pi)
+            self.last_duals = duals
+
+            print(f"\nIteration {it+1}: LP Objective = {obj:.6f}")
             for j, p in enumerate(patterns):
                 val = pulp.value(x_vars[j])
                 print(f"  j={j:2d} stock={p['stock_length']:4d} patt={p['pattern']} x={val:.4f}")
 
-            # For each stock type, solve knapsack (maximize sum(pi_i * a_i))
+            # --- Knapsack subproblem (column generation) ---
             best_reduced = 0.0
             best_new_pattern = None
             for k, Lk in enumerate(stock_lengths):
-                values = duals[:]    # value per item = pi_i
+                values = duals[:]
                 weights = part_lengths[:]
                 best_val, counts = self.solve_unbounded_knapsack(values, weights, Lk)
                 reduced_cost = stock_costs[k] - best_val
-                # We may want only integer counts >0 pattern
                 if reduced_cost < best_reduced - TOL:
+                    best_reduced = reduced_cost
+                    best_new_pattern = {
+                        "stock_index": k,
+                        "stock_length": Lk,
+                        "pattern": tuple(counts),
+                        "waste": Lk - sum(c*w for c, w in zip(counts, weights))
+                    }
+
+            if best_new_pattern is None:
+                print("No improving pattern found — LP relaxation optimal ✅")
+                break
+            else:
+                print("Added new pattern:", best_new_pattern)
+                patterns.append(best_new_pattern)
+        else:
+            print("Reached LP max iterations.")
+
+        # LP selesai
+        x_values = [pulp.value(x) for x in x_vars]
+        print("\n=== LP Solution Done ===")
+
+        # =====================================================
+        # 4️⃣ Integer phase (feasibility repair)
+        # =====================================================
+        for int_iter in range(MAX_INT_ITERS):
+            print(f"\n[Integer Phase] Attempt {int_iter+1}")
+            x_int, status = self.solve_integer_master(
+                patterns, part_lengths, demands, stock_lengths, stock_limits, stock_costs,
+                use_active_only=False, x_lp=x_values, solver_msg=False
+            )
+
+            if status in ("Optimal", "Integer Feasible", "Optimal Solution Found"):
+                print(f"Integer solution feasible ✅ (status={status})")
+                return patterns, x_values, x_int
+
+            print(f"Integer solution infeasible ❌ (status={status}), regenerating new pattern...")
+
+            # --- Generate new column from duals again ---
+            duals = getattr(self, "last_duals", None)
+            if duals is None:
+                print("No duals available for correction → abort.")
+                break
+
+            best_reduced = 0.0
+            best_new_pattern = None
+            for k, Lk in enumerate(stock_lengths):
+                values = duals[:]
+                weights = part_lengths[:]
+                best_val, counts = self.solve_unbounded_knapsack(values, weights, Lk)
+                reduced_cost = stock_costs[k] - best_val
+                if reduced_cost < best_reduced - 1e-8:
                     best_reduced = reduced_cost
                     best_new_pattern = {
                         "stock_index": k,
@@ -113,32 +155,17 @@ class ColumnGeneration(OptimizerStrategy):
                         "waste": Lk - sum(c*w for c,w in zip(counts, weights))
                     }
 
-            if best_new_pattern is None:
-                print(" No improving pattern found for any stock type -> LP-optimal (relaxation) reached.")
-                break
-            else:
-                # Add new pattern
+            if best_new_pattern is not None:
+                print("Added new pattern to fix infeasibility:", best_new_pattern)
                 patterns.append(best_new_pattern)
-                print(" Added new pattern:", best_new_pattern)
-        else:
-            print("Reached max iterations.")
+            else:
+                print("No more improving pattern found, terminating.")
+                break
 
-        # Final LP solution summary
-        print("\n=== Final LP solution ===")
-        for j, p in enumerate(patterns):
-            # if variable exists (some patterns might have been added after), try to display value
-            try:
-                xj = pulp.value(x_vars[j])
-            except Exception:
-                xj = None
-            print(f" j={j:2d} stock={p['stock_length']:4d} patt={p['pattern']} x={xj}")
+        print("⚠️ Integer phase ended without feasible solution.")
+        return patterns, x_values, x_int
 
-        # Display final patterns compactly
-        print("\nFinal patterns list:")
-        pprint(patterns)
 
-        return patterns
-        
         
     # Untuk kemudahan: tambahkan id pada pattern
     def pattern_id(p): return len(p)
@@ -204,3 +231,77 @@ class ColumnGeneration(OptimizerStrategy):
             counts[i] += 1
             c -= weights[i]
         return best_value, counts
+    
+    def solve_integer_master(self, patterns, part_lengths, demands,
+                         stock_lengths, stock_limits, stock_costs,
+                         use_active_only=False, x_lp=None, keep_only_positive_lp=True,
+                         solver_msg=False):
+        """
+        Solve integer master using provided patterns (list of dict).
+        parameters:
+        - patterns: list of pattern dicts (must have 'pattern' tuple and 'stock_index','stock_length')
+        - part_lengths: list[int]
+        - demands: list[int]
+        - stock_lengths, stock_limits, stock_costs: lists
+        - use_active_only: if True, include only patterns where x_lp > 0 (requires x_lp passed)
+        - x_lp: list of LP solution values (same order as patterns) - used if use_active_only True
+        - keep_only_positive_lp: when use_active_only True, whether to include patterns with x_lp > tol
+        returns:
+        - x_int: list of integer counts per pattern (same order as patterns; 0 for excluded)
+        - status: pulp status string
+        """
+        # select patterns to include
+        include_mask = [True] * len(patterns)
+        if use_active_only:
+            if x_lp is None:
+                raise ValueError("x_lp must be provided when use_active_only=True")
+            tol = 1e-9
+            include_mask = [(x_lp[i] > tol) if keep_only_positive_lp else True for i in range(len(patterns))]
+
+        # build ILP
+        prob = pulp.LpProblem("Integer_Master", pulp.LpMinimize)
+        x_vars = []
+        pattern_indices = []  # maps var index -> pattern index
+        for j, p in enumerate(patterns):
+            if not include_mask[j]:
+                x_vars.append(None)
+                continue
+            var = pulp.LpVariable(f"X_int_{j}", lowBound=0, cat="Integer")
+            # x_vars[j] = var
+            x_vars.append(var)
+            pattern_indices.append(j)
+
+        # objective
+        prob += pulp.lpSum((x_vars[j] if x_vars[j] is not None else 0) *
+                        stock_costs[patterns[j]["stock_index"]] for j in range(len(patterns)))
+
+        # demand constraints
+        for i in range(len(part_lengths)):
+            prob += pulp.lpSum(( (patterns[j]["pattern"][i]) * (x_vars[j] if x_vars[j] is not None else 0)
+                                ) for j in range(len(patterns))) >= demands[i], f"dem_int_{i}"
+
+        # stock limits constraints (if finite)
+        for k in range(len(stock_lengths)):
+            if stock_limits[k] is None:
+                continue
+            prob += pulp.lpSum((x_vars[j] if (x_vars[j] is not None and patterns[j]["stock_index"] == k) else 0)
+                            for j in range(len(patterns))) <= stock_limits[k], f"stock_limit_int_{k}"
+
+        # solve ILP (CBC default)
+        solver = pulp.PULP_CBC_CMD(msg=solver_msg)
+        res = prob.solve(solver)
+        status = pulp.LpStatus[prob.status]
+
+        if status not in ("Optimal", "Integer Feasible", "Optimal Solution Found"):
+            # return zeros but include status so caller can handle
+            x_int = [0] * len(patterns)
+            return x_int, status
+
+        x_int = [0] * len(patterns)
+        for j in range(len(patterns)):
+            if x_vars[j] is None:
+                x_int[j] = 0
+            else:
+                x_int[j] = int(round(pulp.value(x_vars[j])))
+
+        return x_int, status

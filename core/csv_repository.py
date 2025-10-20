@@ -1,6 +1,8 @@
 import pandas as pd
+import pulp
 from core.entities import Part, Parts, Stock
 from core.utils import detect_unit_scale, scale_value, descale_value
+from collections import defaultdict
 
 def load_required_parts(filename: str):
     df = pd.read_csv(filename)
