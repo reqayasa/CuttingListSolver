@@ -3,6 +3,7 @@ from tkinter import ttk
 from tkinter import filedialog, messagebox
 from core import csv_repository
 from core.optimizer_service import OptimizerService
+from core.optimizer_strategy.modified_first_fit_decreasing import ModifiedFirstFitDecreasing 
 from gui.style_manager import StyleManager
 
 class CuttingListApp:
@@ -19,7 +20,7 @@ class CuttingListApp:
         self.stocks = None
         self.result = None
 
-        self.optimizer = OptimizerService()
+        self.optimizer = OptimizerService(ModifiedFirstFitDecreasing())
 
         self.btn_frame = ttk.Frame(self.mainframe)
         self.btn_frame.grid(row=0, column=0, pady=10)

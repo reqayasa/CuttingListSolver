@@ -1,11 +1,6 @@
-from abc import ABC, abstractmethod
 import pulp
-
-
-class OptimizerStrategy(ABC):
-    @abstractmethod
-    def optimize(self, required_parts_aggregated, stocks_aggregated):
-        pass
+from core.optimizer_strategy.optimizer_strategy import OptimizerStrategy
+from core.entities import Parts, Part, Stock
 
 class ColumnGeneration(OptimizerStrategy):
     def optimize(self, required_parts_aggregated, stocks_aggregated):

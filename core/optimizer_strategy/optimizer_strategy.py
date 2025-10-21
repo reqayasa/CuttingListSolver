@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-class optimizer_strategy(ABC):
+class OptimizerStrategy(ABC):
     @abstractmethod
     def optimize(self, required_parts, available_stocks):
         pass
